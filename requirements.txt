@@ -1,0 +1,4 @@
+mediapipe==1.0.1
+opencv-python>=4.10
+numpy>=1.26,<3
+comtypes>=1.4
