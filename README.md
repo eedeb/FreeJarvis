@@ -730,6 +730,13 @@ rate and what it detected.
   1920×1080 runs at 30 fps while 1280×720 manages 10. `tune.bat` reports how
   often tracking actually drops out and how often your pointing finger reads as
   curled.
+- **The glove flickers, then becomes a white rectangle** — fixed in 1.0.1.
+  The GPU renderer allocated a new set of framebuffers whenever your hand's
+  bounding box crossed a 64-pixel bucket and released only part of them, so
+  video memory drained away at tens of megabytes a second while your hand
+  moved. Once the driver ran out it handed back uninitialised memory, which
+  reads as full coverage — a solid bright box exactly the size of your hand's
+  bounding box. If you see it on an older copy, re-run the installer.
 - **It feels laggy with a lot on screen** — the overlay's own drawing costs
   about 22% of one core at 30fps with every monitor open, and hand tracking
   costs roughly another 30% on its own thread. If that is too much on your

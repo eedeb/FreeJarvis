@@ -332,6 +332,100 @@ if posed_all:
         check(f"...and it still reaches every joint ({miss:.0f}px)",
               miss < 0.12 * reach)
 
+print("\nIt does not leak the GPU a framebuffer per frame:")
+# The bug: _target allocated a fresh multisampled colour renderbuffer, depth
+# renderbuffer, framebuffer and readback framebuffer every time the hand's
+# bounding box crossed a 64-pixel bucket -- in either direction -- and released
+# only the two framebuffers. moderngl's gc_mode defaults to None, meaning it
+# frees nothing by itself, and no reference was kept to the renderbuffers, so
+# each crossing stranded video memory that nothing could ever reach.
+#
+# Eight still captures produce seven distinct buckets, so a moving hand was
+# doing this most frames. On screen it showed as the glove flickering between
+# the GPU and the CPU renderer and then, once the driver ran out, a white
+# rectangle where the hand should be.
+if posed_all and gpu.available:
+    counted = []
+    real_ctx = gpu.ctx
+
+    class _Counting:
+        """Passes everything through, but counts what GL objects are made."""
+
+        def __init__(self, ctx):
+            self._ctx = ctx
+
+        def __getattr__(self, name):
+            attr = getattr(self._ctx, name)
+            if name not in ("renderbuffer", "depth_renderbuffer",
+                            "framebuffer", "simple_framebuffer"):
+                return attr
+
+            def wrapped(*a, **k):
+                counted.append(name)
+                return attr(*a, **k)
+            return wrapped
+
+        def __setattr__(self, name, value):
+            if name == "_ctx":
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._ctx, name, value)
+
+    gpu.ctx = _Counting(real_ctx)
+    try:
+        hands = list(posed_all.values())
+        buckets = set()
+        for posed, screen, frame in hands:
+            verts = posed["verts"]
+            lo, hi = verts[:, :2].min(axis=0), verts[:, :2].max(axis=0)
+            span = hi - lo
+            buckets.add((max(64, -(-int(span[0]) // 64) * 64),
+                         max(64, -(-int(span[1]) // 64) * 64)))
+        check(f"the captures really do span several size buckets ({len(buckets)})",
+              len(buckets) >= 2)
+
+        drawn = 0
+        passes = 12
+        for _ in range(passes):
+            for posed, screen, frame in hands:
+                canvas = frame.copy()
+                if gpu.draw(canvas, posed):
+                    drawn += 1
+        frames = passes * len(hands)
+        made = len(counted)
+        print(f"      {frames} frames over {len(buckets)} size buckets: "
+              f"{made} GL objects allocated")
+        check(f"it draws them all on the GPU ({drawn}/{frames})", drawn == frames)
+        # Four objects per allocation, and grow-only means it settles. Ten
+        # allocations of headroom is generous and still an order of magnitude
+        # below one per frame, which is what the bug looked like.
+        check(f"and allocates a bounded number of framebuffers, not one a "
+              f"frame ({made} for {frames} frames)", made <= 40)
+        check("the framebuffer only ever grows, so a hand moving back and "
+              "forth across one boundary cannot reallocate for ever",
+              gpu._size[0] >= 64 and gpu._size[1] >= 64)
+
+        # The renderbuffers have to be reachable to be releasable. Holding them
+        # is the whole fix: `framebuffer.release()` does not free what is
+        # attached to it, and with gc_mode=None nothing else will either.
+        check("it keeps a reference to the colour renderbuffer",
+              getattr(gpu, "_rbo", None) is not None)
+        check("and to the depth renderbuffer",
+              getattr(gpu, "_dbo", None) is not None)
+        check("and moderngl is told to clean up after a missed one",
+              real_ctx.gc_mode in ("auto", "context_gc"))
+    finally:
+        gpu.ctx = real_ctx
+
+    # close() has to be safe to call, and safe to call twice: it runs from the
+    # controller's shutdown, which also runs when startup failed halfway.
+    gpu.close()
+    gpu.close()
+    check("it can be shut down, twice, without complaint", gpu._size == (0, 0))
+    # Everything after this needs a working renderer again.
+    gpu = Renderer()
+    check("and a fresh one comes back up", gpu.available)
+
 print("\nIt keeps up with the camera:")
 # Measured against this machine as it is right now, not against a number
 # written down on an idle one.

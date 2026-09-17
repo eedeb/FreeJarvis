@@ -782,6 +782,12 @@ class GestureController:
                 self.finder.stop()
             from .jarvis import cards as _cards
             _cards.shutdown()
+            if self._gpu is not None:
+                # Hands back the framebuffers and the vertex arrays. The
+                # process is about to exit and the driver would reclaim them
+                # anyway, but a renderer that cannot be shut down cleanly is
+                # one nothing else can ever own.
+                self._gpu.close()
             if self._terminal is not None:
                 self._terminal.close()
                 self._terminal = None

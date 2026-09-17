@@ -172,6 +172,11 @@ class Renderer:
         self.ctx = None
         self._size = (0, 0)
         self._msaa = self._flat = None
+        # Held so they can be released. moderngl's Framebuffer.release() frees
+        # the framebuffer object and nothing else -- the renderbuffers hung off
+        # it are separate GL allocations with their own lifetimes, and dropping
+        # the last Python reference to one does not free it either.
+        self._rbo = self._dbo = None
         self._vbo = None
         self._vao: dict = {}
         if moderngl is None:
@@ -179,6 +184,16 @@ class Renderer:
             return
         try:
             self.ctx = moderngl.create_standalone_context()
+            # moderngl frees nothing on its own: the default gc_mode is None,
+            # which means every texture, buffer and renderbuffer stays on the
+            # GPU until something calls release() on that exact object. This
+            # module is careful to, but "auto" makes a missed one survivable --
+            # it releases when Python collects the wrapper, which is the
+            # behaviour every other Python binding would have had by default.
+            try:
+                self.ctx.gc_mode = "auto"
+            except Exception:                                    # noqa: BLE001
+                pass         # older moderngl without the setting; see _free
             self.program = self.ctx.program(vertex_shader=_VERTEX,
                                             fragment_shader=_FRAGMENT)
             self.program["light"].value = tuple(LIGHT)
@@ -200,25 +215,53 @@ class Renderer:
     def available(self) -> bool:
         return self.ctx is not None
 
+    def _free_target(self) -> None:
+        """Give back every GL object the framebuffers are made of.
+
+        All four, individually. Releasing the framebuffer alone leaves its
+        colour and depth renderbuffers allocated, which is the shape of the
+        worst bug this renderer has had: the hand crosses a size bucket several
+        times a second while it moves, each crossing stranded three to sixteen
+        megabytes of video memory, and after a minute or two of use the driver
+        ran out and started handing back garbage. On screen that was a glove
+        flickering between the GPU and the CPU renderer, and then a white
+        rectangle where the hand should be.
+        """
+        for old in (self._msaa, self._flat, self._rbo, self._dbo):
+            if old is not None:
+                try:
+                    old.release()
+                except Exception:                                # noqa: BLE001
+                    pass       # already gone; nothing left to give back
+        self._msaa = self._flat = self._rbo = self._dbo = None
+
     def _target(self, width: int, height: int):
-        """Framebuffers at least this big, grown in steps and then kept.
+        """Framebuffers at least this big, grown when needed and never shrunk.
 
         Allocating exactly the hand's rectangle would reallocate on almost
         every frame, since the hand is never quite the same size twice.
+
+        Grow-only, rather than tracking the size in both directions. A hand
+        moving towards and away from the camera crosses the same bucket
+        boundary over and over, and reallocating each way turned one boundary
+        into an unbounded number of allocations. Keeping the largest size seen
+        costs the memory of one big hand and reallocates a handful of times a
+        session. The viewport, the clear and the read are all given explicit
+        rectangles already, so a framebuffer larger than the hand is not a
+        thing anything downstream has to know about.
         """
         # Rounded up to a multiple of 64 rather than to a power of two: a
         # 560-wide hand would otherwise take a 1024-wide buffer and read back
         # nearly twice the pixels it needs.
         want = (max(64, -(-width // 64) * 64), max(64, -(-height // 64) * 64))
-        if want != self._size:
-            for old in (self._msaa, self._flat):
-                if old is not None:
-                    old.release()
-            self._msaa = self.ctx.framebuffer(
-                self.ctx.renderbuffer(want, 4, samples=SAMPLES),
-                self.ctx.depth_renderbuffer(want, samples=SAMPLES))
-            self._flat = self.ctx.simple_framebuffer(want, components=4)
-            self._size = want
+        grown = (max(want[0], self._size[0]), max(want[1], self._size[1]))
+        if self._msaa is None or grown != self._size:
+            self._free_target()
+            self._rbo = self.ctx.renderbuffer(grown, 4, samples=SAMPLES)
+            self._dbo = self.ctx.depth_renderbuffer(grown, samples=SAMPLES)
+            self._msaa = self.ctx.framebuffer(self._rbo, self._dbo)
+            self._flat = self.ctx.simple_framebuffer(grown, components=4)
+            self._size = grown
         return self._msaa, self._flat
 
     def _array(self, posed, verts, faces):
@@ -255,6 +298,24 @@ class Renderer:
                 [(self._vbo, "3f 3f 3f", "in_pos", "in_nrm", "in_col")],
                 index_buffer=index, index_element_size=4))
         return self._vao[key][1]
+
+    def close(self) -> None:
+        """Release everything. Safe to call twice."""
+        self._free_target()
+        if self._vbo is not None:
+            try:
+                self._vbo.release()
+            except Exception:                                    # noqa: BLE001
+                pass
+            self._vbo = None
+        for index, array in list(self._vao.values()):
+            for obj in (array, index):
+                try:
+                    obj.release()
+                except Exception:                                # noqa: BLE001
+                    pass
+        self._vao.clear()
+        self._size = (0, 0)
 
     def set_style(self, holo: bool) -> None:
         """Projected light, or painted metal."""
@@ -308,7 +369,9 @@ class Renderer:
         raw = flat.read(viewport=(0, 0, want_w, want_h), components=4,
                         alignment=1)
 
-        # GL hands back its rows bottom to top.
+        # GL hands back its rows bottom to top. The viewport was the hand's
+        # rectangle, not the framebuffer's, so this is that many rows however
+        # much bigger the buffer behind it happens to be.
         shot = np.frombuffer(raw, np.uint8).reshape(want_h, want_w, 4)[::-1]
         # The rectangle the projection covered may hang off the frame; take the
         # part of it that landed on screen.
