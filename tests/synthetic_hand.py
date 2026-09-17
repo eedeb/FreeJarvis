@@ -126,3 +126,21 @@ FIST.update({
     lm.INDEX_MCP: (-0.33, -0.91), lm.MIDDLE_MCP: (0.00, -0.96),
     lm.RING_MCP: (0.30, -0.90), lm.PINKY_MCP: (0.57, -0.82),
 })
+
+
+# Fingers spread wide, as when you hold a palm up to a webcam. The gaps between
+# the digits are the point: armour that fills them in renders as a mitten, and
+# nothing in the closer-fingered poses above catches that.
+SPLAYED = dict(OPEN_PALM)
+SPLAYED.update({
+    lm.INDEX_MCP: (-0.42, -0.90), lm.INDEX_PIP: (-0.62, -1.42),
+    7: (-0.72, -1.74), lm.INDEX_TIP: (-0.80, -2.02),
+    lm.MIDDLE_MCP: (-0.05, -1.00), lm.MIDDLE_PIP: (-0.10, -1.55),
+    11: (-0.12, -1.85), lm.MIDDLE_TIP: (-0.14, -2.15),
+    lm.RING_MCP: (0.32, -0.95), lm.RING_PIP: (0.46, -1.45),
+    15: (0.54, -1.74), lm.RING_TIP: (0.60, -2.00),
+    lm.PINKY_MCP: (0.62, -0.85), lm.PINKY_PIP: (0.92, -1.22),
+    19: (1.06, -1.46), lm.PINKY_TIP: (1.18, -1.68),
+    lm.THUMB_MCP: (-0.78, -0.30), lm.THUMB_IP: (-1.10, -0.55),
+    lm.THUMB_TIP: (-1.38, -0.78),
+})

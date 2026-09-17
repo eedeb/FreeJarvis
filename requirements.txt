@@ -2,3 +2,22 @@ mediapipe==1.0.1
 opencv-python>=4.10
 numpy>=1.26,<3
 comtypes>=1.4
+
+# Jarvis — the FreeClaw brain, the arc reactor and "hey Jarvis".
+# The overlay runs without any of these; each missing one turns off the part
+# that needs it and says so at startup.
+requests>=2.31            # talking to FreeClaw, and its MCP calls back here
+sounddevice>=0.4.6        # microphone and speaker I/O
+openwakeword>=0.6.0       # the "hey jarvis" wake word, run on every frame
+onnxruntime>=1.16.0       # openwakeword's inference backend
+webrtcvad-wheels>=2.0.11  # end-of-speech detection (prebuilt wheels — plain
+                          # webrtcvad needs a C compiler on Windows)
+faster-whisper>=1.0.0     # local speech-to-text (tiny.en, int8, CPU)
+edge-tts>=6.1.0           # the voice it answers in
+soundfile>=0.12           # decoding that voice for playback
+psutil>=5.9              # the machine's own vital signs: cpu, memory, disks,
+                         # battery, network counters, the process table
+pycaw>=20240210          # the real system volume, and the output level meter
+soundcard>=0.4.6         # WASAPI loopback, for the output spectrum
+pillow>=10.0             # Consolas, for the session log's character grid
+                         # (missing it falls back to OpenCV's own font)

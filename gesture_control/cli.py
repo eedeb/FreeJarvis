@@ -36,6 +36,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="hide the webcam preview window while controlling")
     p.add_argument("--no-gauntlet", action="store_true",
                    help="draw the plain tracking skeleton instead of the gauntlet")
+    p.add_argument("--window", action="store_true",
+                   help="show the preview in a floating window instead of as a "
+                        "full-screen overlay")
+    p.add_argument("--overlay-dim", type=float, metavar="F",
+                   help="how visible the camera image is in the overlay, 0 to 1 "
+                        "(0, the default, hides it and shows only the glove)")
+    p.add_argument("--gauntlet-style", choices=("holo", "solid"),
+                   help="draw the glove as projected light or as painted metal")
+    p.add_argument("--gauntlet-model", choices=("rig", "drawn"),
+                   help="which gauntlet to draw: the rigged generated glove, "
+                        "or flat vectors")
     p.add_argument("--recalibrate", action="store_true",
                    help="force calibration even if a saved one exists")
     return p
@@ -50,6 +61,14 @@ def _apply_overrides(settings: Settings, args: argparse.Namespace) -> None:
         settings.show_preview = False
     if args.no_gauntlet:
         settings.gauntlet = False
+    if args.window:
+        settings.overlay = False
+    if args.overlay_dim is not None:
+        settings.overlay_dim = args.overlay_dim
+    if args.gauntlet_style:
+        settings.gauntlet_style = args.gauntlet_style
+    if args.gauntlet_model:
+        settings.gauntlet_model = args.gauntlet_model
 
 
 def cmd_check(settings: Settings) -> int:

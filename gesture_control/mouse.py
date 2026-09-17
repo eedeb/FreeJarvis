@@ -23,8 +23,6 @@ MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
-MOUSEEVENTF_MIDDLEDOWN = 0x0020
-MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_ABSOLUTE = 0x8000
 MOUSEEVENTF_VIRTUALDESK = 0x4000
@@ -164,10 +162,6 @@ class Mouse:
     def right_click(self) -> None:
         _send(MOUSEEVENTF_RIGHTDOWN)
         _send(MOUSEEVENTF_RIGHTUP)
-
-    def middle_click(self) -> None:
-        _send(MOUSEEVENTF_MIDDLEDOWN)
-        _send(MOUSEEVENTF_MIDDLEUP)
 
     def scroll(self, notches: float) -> None:
         """Scroll by a fractional number of wheel notches.

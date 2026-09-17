@@ -18,6 +18,422 @@ official MediaPipe bucket). After that it starts in a couple of seconds.
 You need Python 3.10 or newer installed. If it is missing, `run.bat` says so and
 links to the installer — tick *Add python.exe to PATH* during setup.
 
+## The overlay
+
+Your hand gets an armoured glove projected onto it, floating over your desktop.
+The webcam picture itself is hidden — there is no video on your screen, just the
+glove tracking your hand, the orb, and whatever Jarvis is saying. You can see through it and click through it, and it sits below
+every application window — open a browser and the browser is in front of it; it
+covers only the wallpaper and the desktop icons.
+
+Because it never takes focus, its keys are all `Ctrl`+`Alt`+letter, so a plain
+letter still reaches whatever you are typing in:
+
+| | |
+|---|---|
+| `Ctrl+Alt+Q` | quit (or `Ctrl+C` in the terminal) |
+| `Ctrl+Alt+P` | pause and resume control |
+| `Ctrl+Alt+K` | on-screen keyboard |
+| `Ctrl+Alt+S` | snapping on and off |
+| `Ctrl+Alt+J` | add or re-link a FreeClaw install (see [Jarvis](#jarvis)) |
+| `Ctrl+Alt+M` | hand the mouse back, and take it again |
+
+`--overlay-dim` brings the webcam picture back, from `0` (hidden, the default)
+to `1` (fully visible). The glove and the readouts stay solid whatever it is,
+so raising it fades the room in behind them rather than fading everything.
+Mostly useful when the tracking is behaving oddly and you want to see what the
+camera sees.
+
+```bash
+.venv\Scripts\python -m gesture_control run --overlay-dim 0.3
+```
+
+`--window` puts the preview back in an ordinary floating window, which is the
+one to use when working on the gauntlet itself: it can be screenshotted and
+dragged around, and a layered window cannot be.
+
+## Jarvis
+
+An arc reactor sits in the top right of the overlay. Say **"hey Jarvis"**, ask
+for something, and it answers out loud.
+
+The orb is a real 3D object, not a picture of one: two nested spheres of
+glowing filaments, counter-rotating, projected through a perspective divide and
+shaded by depth every frame. It turns slowly all the time, so you can watch the
+near side sweep across and the far side dim behind it — that parallax is the
+whole reason it reads as a sphere rather than as a drawn circle.
+
+It is also the status light. It drifts when idle; **flashes and swells the
+instant it hears the wake word**; brightens while the microphone is open; spins
+fast while the answer is being worked out; and **pulses in time with the actual
+speech** while it reads the reply back, driven by the playback waveform rather
+than a fixed "talking" brightness.
+
+The orb is drawn over a backdrop that takes the wallpaper down to near-black
+first, so it looks the same over a bright sky as over a dark desktop. That
+backdrop states its own opacity rather than relying on the overlay's
+differs-from-the-camera rule — a detail that matters, because darkening a dim
+room barely differs from it at all.
+
+### The session log
+
+Under the orb sits a small terminal, and everything a turn does scrolls
+through it as it happens: what you said, which provider took it, the model's
+reasoning, every tool call with its arguments and what it returned, and the
+reply building a word at a time. A turn that spends thirty seconds running
+tools looks like it is working, instead of looking broken.
+
+```
+ JARVIS // SESSION LOG                            THINKING   LIVE
+ > open chrome and tell me how much memory this thing has
+ :: asking Groq
+ .. Two things: launch the browser, then report memory.
+ $ open_app(name=chrome)
+ $ -> Opened Google Chrome.
+ $ system_info()
+ $ -> CPU: 16 logical cores. Memory: 31.7 GB total, 12.4 GB free.
+ < Chrome is up, sir. 31.7 gigabytes, with 12.4 free.
+```
+
+It is a real character grid — Consolas rendered once into a fixed cell at
+startup, then the whole body drawn as a single array lookup — because tool
+calls only read as tool calls when the columns line up.
+
+It has a **fixed size and stays well clear of the bottom of the screen**. Older
+output is scrollback rather than gone: it follows the newest line while you
+leave it alone, stops the moment you scroll up (the header turns from `LIVE` to
+`HOLD -12`, so you can see how far back you are), and follows again when you
+return to the bottom. New output never moves the text out from under you
+mid-sentence.
+
+Scroll it with the **wheel**, or by **dragging it** with the mouse — or with the
+hand-tracked cursor, which has no wheel. Both exist for a reason: the window
+never takes focus, so the wheel only reaches it while Windows is routing wheel
+events by hover, which is the default but can be turned off.
+
+Like the audio widget, it is its own see-through window rather than something
+painted on the overlay. That is what lets it redraw on its own clock — a reply
+streaming in while the camera is stalled still arrives — and what makes its
+text sharp, since the overlay stretches the camera frame to fill the screen and
+anything painted into it is stretched with it.
+
+### Talking to it
+
+Three things make it a conversation rather than a command line with a
+microphone on it.
+
+**You only summon it once.** For nine seconds after Jarvis finishes speaking,
+plain speech is the next turn — no second "hey Jarvis". Outside that window
+the wake word is required again, because a microphone that reacts to any
+noise in the room is worse than one that occasionally needs asking twice.
+
+**You can interrupt it.** The wake word keeps being scored *while Jarvis is
+talking*, so saying "hey Jarvis" over a long answer cuts it off and starts
+listening. Previously the microphone was deafened during playback so Jarvis
+could not wake itself, which also meant you had to sit through whatever it
+had decided to say.
+
+**It starts talking sooner.** Replies are spoken a sentence at a time as they
+stream in, with the synthesiser running one sentence ahead of playback. Most
+of what makes an assistant feel slow is the silence between asking and the
+first sound, and that silence was as long as the whole answer took to write.
+
+Speech recognition defaults to `base.en`, which is noticeably better than
+`tiny.en` on short commands. If it is not downloaded yet Jarvis listens on
+`tiny.en` immediately and swaps over in the background, so a better default
+never costs a slow first run.
+
+The brain is [FreeClaw](https://freeclaw.eedeb.dev), running either on this
+machine or another one on your network.
+
+### Connecting it
+
+Press `Ctrl+Alt+J`, enter the address and password of your FreeClaw install,
+and press Connect. The address is just the IP — `192.168.1.40`, or
+`localhost` if it is on this machine — and port 6767 is assumed. The password
+is the one FreeClaw's own web UI asks for.
+
+That one button does five things:
+
+1. creates a FreeClaw user called **Jarvis**
+2. writes the Jarvis persona into that user's `context.md`
+3. starts an MCP server *here* and registers it with FreeClaw
+4. switches FreeClaw's OpenAI-compatible API on
+5. checks it has an LLM provider enabled, and says so if it does not
+
+It is safe to run again — that is how you push an edited persona, move to a
+different FreeClaw, or repair the registration after a reinstall.
+
+**Run it again after updating this app, too.** FreeClaw remembers what a tool
+server offered the first time it asked, keyed on the server's address, and
+nothing about re-registering the same address changes that. So a version of
+this app with new tools in it stays invisible until you press `Ctrl+Alt+J`,
+which gives FreeClaw an address it has not seen before and makes it look
+again.
+
+### What it can do to this computer
+
+The MCP server gives the agent 44 tools that act on **this** machine, not on
+FreeClaw's:
+
+| | |
+|---|---|
+| **files** | `create_file` `create_folder` `read_file` `list_folder` `move_path` `delete_path` `open_path` |
+| **apps** | `open_app` `list_apps` `open_url` `run_program` |
+| **windows** | `list_windows` `focus_window` `window_state` `close_window` |
+| **sound** | `get_volume` `set_volume` `set_muted` `media_key` |
+| **the machine** | `system_info` `battery_status` `disk_usage` `list_processes` `end_process` `take_screenshot` `clipboard_get` `clipboard_set` `lock_screen` |
+| **over time** | `sensor_history` |
+| **the network** | `network_status` `ping` `public_network` `fetch_url` |
+| **finding things** | `search_files` |
+| **the screen** | `show_monitor` `show_card` `show_file` `close_card` `list_cards` |
+| **standing orders** | `watch_for` `list_watches` `stop_watching` |
+| **keyboard** | `type_text` `press_keys` |
+
+`open_app` finds things by the name they have on your Start Menu or desktop,
+so "open Chrome" works without knowing where Chrome is installed. `run_program`
+runs a command and gives back what it printed.
+
+**The file tools are confined** to your Desktop, Documents, Downloads and temp
+folder. That boundary is deliberately narrow: an agent that browses the web can
+be told what to do by a web page, and this is what stops that reaching anything
+but your own documents. Widening `ROOTS` in
+[tools.py](gesture_control/jarvis/tools.py) widens that too.
+
+**The two keyboard tools are not confined by anything.** `type_text` and
+`press_keys` can do whatever you could do at the keyboard, including typing
+into a terminal — and they are reachable by the same agent that reads web
+pages. They are on because an assistant that cannot type is much less useful,
+and the persona tells Jarvis to ask before typing anywhere that runs what it is
+given. If you would rather not have them at all, set `"tools_keyboard": false`
+in `jarvis.json`; everything else keeps working.
+
+The server listens on port 8788 with a bearer token minted at setup. If
+FreeClaw is on another machine, that port has to be open through this one's
+firewall — FreeClaw dials *in* to run a tool.
+
+### Handing the mouse back
+
+A small **GESTURES ON / MOUSE ONLY** button sits in the top-right corner, with
+the orb below it. Click it to stop the hand driving the cursor; click it again
+to take it back. Your hand is still tracked and the gauntlet still drawn either
+way — only the mouse events stop.
+
+It has to be its own little window rather than part of the overlay, because the
+overlay is click-through: that is what stops it swallowing the clicks this app
+makes, and the flag is per-window, so there is no way to carve one clickable
+rectangle out of it. It sits in the same layer as the overlay, under every
+application window, so a browser covers it like it covers everything else —
+which does mean it is only clickable when nothing is on top of it.
+
+`Ctrl+Alt+M` is the way to reach it the rest of the time, and is why the
+keyboard route exists at all.
+
+Two more buttons sit beside it: **RESET** clears the conversation on both
+sides — the session log here and FreeClaw's own history, because clearing
+only one is a lie — and **QUIT** closes the app, the same exit `Ctrl+Alt+Q`
+takes. QUIT is placed at the far end of the strip, not next to the toggle,
+since it is the one you least want to hit while reaching for the one you
+actually use. So does `Ctrl+Alt+P`, and the held-open-palm pose
+in finger-aiming mode; the button shows whichever of them last changed it.
+
+### The workbench
+
+The stacking, top to bottom:
+
+```
+your applications        untouched, they cover everything below
+the widgets              toggle button, session log, cards, audio panel
+the camera overlay       see-through camera, glove, orb
+your wallpaper           and the desktop icons
+```
+
+**The audio widget**, bottom right. The top half is a 24-band spectrum of what
+your speakers are *actually* playing, mirrored about a centre line so it reads
+as a waveform. The bottom half is the system volume — drag it and the real
+master volume moves, the same control the tray icon drives.
+
+It reads the output two ways, in order of preference: WASAPI loopback, which
+gives the real samples and so a real spectrum; or failing that the audio
+endpoint's own peak meter, which is one level rather than a spectrum, so the
+bars become a scrolling history instead. When it falls back it says `level` in
+the corner rather than letting a history pass for a spectrum.
+
+Like the session log, this panel answers the mouse — a slider has to be
+draggable, and the overlay is click-through by design. So it is its own
+translucent window, which is also why it redraws on its own 30 Hz clock rather
+than with the camera. Both sit *under* your applications, so the only clicks
+they take are ones that would otherwise have landed on the wallpaper.
+
+### Cards, and monitoring the situation
+
+Jarvis can put things on the screen and leave them there. Two kinds, and the
+difference between them is the whole point:
+
+**Monitors** watch something and keep being true on their own — `cpu`,
+`memory`, `network`, `battery`, `disk`, `processes`. "Keep an eye on the
+network" opens one and Jarvis stops thinking about it; it redraws itself from
+the sensors ten times a second whether or not anyone is talking. Each shows
+the current reading, a bar, the numbers behind it, and a two-minute graph, so
+a glance answers *has it been like this for long* as well as *what is it now*.
+
+**Cards** are Jarvis's own text, held still until it has reason to change
+them: a checklist, a countdown, the four steps you asked for. Writing to the
+same title replaces the contents, which is how one gets kept up to date.
+
+**File cards** show a file — text, markdown, or a picture — and *follow* it.
+`show_file` once, then rewrite the file, and the screen changes on its own
+with no second tool call. That is the difference between a widget and a
+snapshot: a card that has to be re-issued is silently stale the moment
+anything else happens. Point one at `ping.md` and Jarvis has a panel it can
+keep updating by writing a file.
+
+They stack down the left edge — the right is the orb, the log and the audio
+widget — and they are placed when they open and do not move afterwards, so
+the thing you were reading stays where you were reading it.
+
+```
+hey jarvis, keep an eye on the cpu and tell me if it spikes
+hey jarvis, put the deployment steps on my screen
+hey jarvis, clear the screen
+```
+
+### Standing orders
+
+A monitor is something *you* look at. `watch_for` is the other half — "tell me
+if the network drops" — and it is what makes it worth leaving running rather
+than something you go and consult. Jarvis speaks up on its own when a
+condition holds.
+
+Three things keep that from being a nuisance:
+
+- **It has to hold.** CPU touches 100% every time anything launches. A watch
+  has to be continuously true for eight seconds before it says anything.
+- **It fires once.** Having said the disk is nearly full, saying it again
+  thirty seconds later carries no information and interrupts whatever you did
+  about the first one. A tripped watch stays quiet until the reading has
+  recovered past a margin — hysteresis, not a cooldown, so a value sitting on
+  the threshold cannot chatter across it.
+- **It waits its turn.** Announcements are held while a turn is running or
+  while Jarvis is speaking, rather than cutting across your own conversation.
+
+```
+hey jarvis, tell me if the wifi drops
+hey jarvis, warn me when the disk gets under twenty gigs
+hey jarvis, what are you watching?
+```
+
+### What it can find out
+
+The sensors behind those monitors are also tools, so Jarvis answers from
+measurements rather than from guesses. Everything here reads the same
+one-second sampler, so the number it says out loud is the number on the card.
+
+| | |
+|---|---|
+| **the machine** | `system_info` `battery_status` `disk_usage` `list_processes` `end_process` |
+| **over time** | `sensor_history` — *has* it been like this for long, not just *is* it |
+| **the network** | `network_status` `ping` `public_network` `fetch_url` |
+| **finding things** | `search_files` |
+
+`network_status` reads this machine only: Wi-Fi name, signal, band and link
+rate from `netsh`, addresses and the default route, whether the internet
+answers and how fast traffic is flowing. `public_network` is kept separate
+because it is the one that asks an outside service — different question,
+different consequences, and a tool list is the wrong place to be vague about
+which is which.
+
+`fetch_url` fetches from *this* machine, which is the point: a router's
+status page, a printer, a NAS, something on localhost — none of them
+reachable from wherever FreeClaw is running.
+
+### Turning bits of it off
+
+```jsonc
+// jarvis.json, beside the app
+{ "voice": false,        // stop listening for "hey Jarvis"
+  "speech": false,       // reply on the overlay only, no speaking
+  "reactor_size": 0.26,  // orb size, as a fraction of the shorter screen edge
+  "speech_model": "base.en",   // faster-whisper model for what you say
+  "voice_name": "en-GB-RyanNeural",
+  "followup_seconds": 9,       // 0 requires "hey Jarvis" every turn
+  "audio_widget": true,  // the spectrum and volume slider
+  "terminal": true,      // the session log under the orb
+  "terminal_width": 0.30,  // its size, as a fraction of the screen
+  "terminal_height": 0.30,
+  "tools_keyboard": true // let the agent type and press keys
+}
+```
+
+Everything here is optional. No FreeClaw, no microphone or no speakers each
+turns off just the part that needs it, says so once at startup, and leaves the
+rest of the overlay working.
+
+## The glove
+
+Your hand gets a gauntlet — not painted onto it, projected onto it. It is
+translucent, lit along its edges and faint across its faces, drawn in one
+colour of cyan with fine scanlines and a colour fringe, so it reads as light
+rather than as a glove you are wearing. Whatever is on your desktop shows
+through it.
+
+With the camera hidden (the default) there is nothing behind the glove for it
+to be measured against, so its own brightness becomes its opacity — bright
+edges are solid, faint faces are see-through. Turn the camera back on and it is
+your hand showing through instead.
+
+That is one property doing most of the work: a surface turned away from the
+camera is bright, a surface facing it is faint. It is what you see of a
+projected solid — its edges, not its faces — and it comes out of the fragment
+shader in a line.
+
+`--gauntlet-style solid` paints it as red and gold armour instead.
+
+### What the overlay costs
+
+Worth knowing, because it shares a machine with hand tracking and the two are
+competing for the same cores. Measured on the machine this was built on, at
+30fps with six monitors open:
+
+| | per frame | per second |
+|---|---|---|
+| mirroring the camera frame | 0.22 ms | 7 ms |
+| the arc reactor | 3.7 ms | 111 ms |
+| packing and scaling for Windows | 3.5 ms | 105 ms |
+| six monitors (asked once a second) | 0.28 ms | 0.3 ms |
+| **the overlay, all in** | | **223 ms — 22% of a core** |
+
+Hand tracking is about 10 ms a frame on its own thread and is not on that
+list: MediaPipe's cost is the neural net, which runs at a fixed input size, so
+feeding it a smaller frame does not make it cheaper. That was measured against
+the real captures in `captures/` rather than assumed, and a smaller input was
+also measurably *less* accurate.
+
+Four things carry most of that budget, and each is documented where it lives:
+
+- **The orb's wide bloom** is blurred at quarter size and scaled back up.
+  A Gaussian of sigma *s* on an image reduced by *k* is a Gaussian of *s·k* on
+  the original, at 1/k² the pixels with a 1/k kernel — the same glow for a
+  sixteenth of the arithmetic, with the worst pixel differing by 0.8 of 255.
+- **Depth shading is a 256-entry table**, not arithmetic over eight thousand
+  points. The colour of a point depends on one number, so there are only 256
+  distinct answers.
+- **The frame is cropped before it is mirrored.** Two thirds of a mirrored
+  1080p frame were being thrown away immediately afterwards. With the camera
+  hidden it is not mirrored at all — the result was known before the camera
+  was read.
+- **The pixels are packed at the frame's size and scaled once**, rather than
+  scaling the colour and the mask separately and then doing three passes at
+  screen size. That is also the more correct order: premultiplied alpha is
+  exactly the representation in which interpolating a translucent image is
+  valid, so scaling afterwards is what *stops* edges haloing.
+
+The monitors are asked what they say once a second rather than ten times,
+because the sampler behind them only moves once a second. One of them had been
+opening a TCP connection to a DNS resolver on every redraw to check whether
+the internet was up — ten sockets a second for a number that cannot change
+that fast.
+
 ## How it works
 
 The camera's view is stretched to fill your screen, and then hidden. Wherever
@@ -255,6 +671,14 @@ rate and what it detected.
   1920×1080 runs at 30 fps while 1280×720 manages 10. `tune.bat` reports how
   often tracking actually drops out and how often your pointing finger reads as
   curled.
+- **It feels laggy with a lot on screen** — the overlay's own drawing costs
+  about 22% of one core at 30fps with every monitor open, and hand tracking
+  costs roughly another 30% on its own thread. If that is too much on your
+  machine, in rough order of what buys the most back:
+  `close_card all` (each card is a layered window the compositor has to
+  blend), `"audio_widget": false`, a smaller `"reactor_size"` — the orb is the
+  single most expensive thing drawn, and its cost goes with the square of its
+  size — and finally `"terminal": false`.
 - **It pauses by itself** — the open-palm gesture now needs all five fingers
   straight *and* splayed apart *and* the hand held still for most of a second.
   If it still fires, raise `palm_spread_min` in `settings.json`, or set
@@ -380,10 +804,43 @@ gesture_control/
   tracker.py             MediaPipe hand landmarks, on a worker thread
   camera.py              webcam capture, on another one
   mouse.py               Windows SendInput
+  keyboard.py            Windows key events, for the scroll and menu poses
   landmarks.py           finger geometry (extended? pinched? pointing where?)
   filters.py             1-Euro pointer smoothing
+  session.py             the CSV log of what the controller did each frame
+  overlay.py             the see-through, click-through full-screen window
+  jarvis/
+    agent.py             the state machine: heard -> asked -> spoken
+    client.py            the FreeClaw HTTP surfaces
+    link.py              "Add FreeClaw": one call that wires the two together
+    tools.py             the MCP server FreeClaw calls back into
+    voice.py             "hey Jarvis", speech to text, and the voice it answers in
+    reactor.py           the arc reactor in the corner
+    terminal.py          the session log under it, and its scrollback
+    sensors.py           one sampler: cpu, memory, disks, battery, network
+    status.py            the tools that answer rather than change
+    screen.py            the tools that put cards on the screen
+    cards.py             those cards, and the board that arranges them
+    holo.py              one palette and one frame for every see-through panel
+    watch.py             standing orders it speaks up about on its own
+    toggle.py            the clickable GESTURES ON / MOUSE ONLY button
+    widget.py            a see-through window that answers the mouse
+    audio.py             the output spectrum, and the system volume
+    audio_panel.py       the audio widget drawn on top of those
+    actions.py           apps, windows, sound, clipboard, screenshots
+    dialog.py            the address-and-password window
+    persona.md           who Jarvis is, written into FreeClaw's context.md
+  glove.py               the gauntlet overlay: skinning the rig to the hand
+  gltf.py                reading models/gauntlet.glb
+  render.py              drawing it, on the GPU or on the CPU
+  gauntlet.py            the flat drawn fallback, when neither is available
   config.py, cli.py      settings and command line
+tools/
+  bl_gauntlet.py         generates models/gauntlet.glb, runs inside Blender
+  blender_run.py         runs a bl_*.py script inside headless Blender
 tests/
+models/gauntlet.glb      the generated glove (committed; rebuild with bl_gauntlet)
+jarvis.json              written by Add FreeClaw (holds the password)
 calibration.json         written by calibration
 settings.json            written when calibration tunes your pinch thresholds
 ```

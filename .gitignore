@@ -4,3 +4,6 @@ __pycache__/
 models/*.task
 calibration.json
 settings.json
+models/incoming/
+models/gauntlet_*.png
+jarvis.json

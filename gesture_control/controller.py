@@ -26,11 +26,16 @@ Finger aiming (aim_mode "finger")
     open palm, held ~1s              pause / resume control
 
 Palm aiming has no pause pose: an open hand is how you aim, so it cannot also
-mean stop. Use P in the preview window.
+mean stop. Use Ctrl+Alt+P.
+
+The preview is a full-screen overlay: see-through, click-through, and pinned
+below every application window. See overlay.py.
 """
 
 from __future__ import annotations
 
+import pathlib
+import threading
 import time
 from collections import deque
 
@@ -39,6 +44,10 @@ import numpy as np
 
 from . import gauntlet
 from . import landmarks as lm
+from .glove import Glove
+from .overlay import Overlay
+from .jarvis.agent import Jarvis
+from .render import Renderer, draw_flat
 from .config import Settings
 from . import keyboard
 from .filters import OneEuroFilter
@@ -118,6 +127,58 @@ class GestureController:
         # Set by run(); left None in tests and when snapping is switched off.
         self.finder: TargetFinder | None = None
         self.snap_target: Target | None = None
+
+        # The gauntlet, loaded once. Missing or unreadable assets are not an
+        # error at any level: each of these falls through to the next, and the
+        # flat drawn gauntlet at the end needs nothing but OpenCV.
+        #
+        #   rig + GPU   the generated glove, skinned, with a depth buffer
+        #   rig + CPU   the same geometry through the flat rasteriser
+        #   drawn       flat vectors
+        self._glove: Glove | None = None
+        self._gpu: Renderer | None = None
+        # Set by run(); the preview is an ordinary window until then, which is
+        # what the tests drive.
+        self._overlay: Overlay | None = None
+        # Which camera frame the preview last drew, and that frame before
+        # anything was drawn on it -- the overlay needs the bare version to
+        # work out which pixels are camera and which are the app's.
+        self._drawn_stamp = -1
+        self._clean_frame: np.ndarray | None = None
+        # The black drawing surface used when the camera is hidden, and the
+        # all-black frame it is compared against.
+        self._blank: np.ndarray | None = None
+        self._blank_clean: np.ndarray | None = None
+        # Jarvis. Started by run() alongside the overlay, because the reactor
+        # it draws and the dialog its hotkey opens both need one.
+        self.jarvis: Jarvis | None = None
+        self._reactor = None
+        self._reactor_at = 0.0
+        self._orb_top = 0
+        # Per-pixel alpha floor for the things Jarvis draws. Rebuilt to match
+        # the frame the first time one arrives, since the crop size is not
+        # known until then.
+        self._solid: np.ndarray | None = None
+        self._dialog = None
+        self._toggle = None
+        self._buttons = None
+        self._audio = None
+        self._terminal = None
+        # Whether opening it has been attempted. Separate from the terminal
+        # itself, because a failure must not be retried on every frame.
+        self._terminal_placed = False
+        # The lowest a Jarvis panel may reach, in screen pixels. Set once the
+        # audio widget's position is known, because the terminal has to stop
+        # above it.
+        self._panel_floor = 0
+        if settings.gauntlet and settings.gauntlet_model == "rig":
+            glove = Glove()
+            self._glove = glove if glove.available else None
+            if self._glove is not None:
+                gpu = Renderer()
+                self._gpu = gpu if gpu.available else None
+                if self._gpu is not None:
+                    self._gpu.set_style(settings.gauntlet_style == "holo")
 
         # Raw (unmapped, unsnapped) predictions, used to estimate how noisy the
         # tracking currently is and report it back to the user.
@@ -653,11 +714,22 @@ class GestureController:
 
     def run(self) -> None:
         print(_HELP.get(self.settings.aim_mode, _HELP["finger"]))
-        print("Press Q or Esc in the preview window (or Ctrl+C here) to quit.")
         window = "Gesture Control"
-        if self.settings.show_preview:
+        if self.settings.show_preview and self.settings.overlay:
+            self._overlay = Overlay(self.model.screen, self.settings.overlay_dim)
+            if not self._overlay.available:
+                print(self._overlay.unavailable_reason + " Using a window.")
+                self._overlay = None
+        if self.settings.show_preview and self._overlay is None:
             cv2.namedWindow(window, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(window, 640, 360)
+        if self._overlay is not None:
+            print("Overlay is on the screen. Press Ctrl+Alt+Q (or Ctrl+C here) "
+                  "to quit; it ignores plain keys so they reach whatever you "
+                  "are typing in.")
+            self._start_jarvis()
+        else:
+            print("Press Q or Esc in the preview window (or Ctrl+C here) to quit.")
 
         if self.settings.snap_enabled:
             self.finder = TargetFinder(self.model.screen,
@@ -696,6 +768,9 @@ class GestureController:
                 if self.settings.show_preview:
                     if not self._draw_preview(window, hand):
                         break
+                    if self._overlay is not None:
+                        self._relink_if_dialog_finished()
+                        time.sleep(0.002)
                 else:
                     time.sleep(0.004)
         except KeyboardInterrupt:
@@ -705,7 +780,25 @@ class GestureController:
             self._write_session()
             if self.finder is not None:
                 self.finder.stop()
-            if self.settings.show_preview:
+            from .jarvis import cards as _cards
+            _cards.shutdown()
+            if self._terminal is not None:
+                self._terminal.close()
+                self._terminal = None
+            if self._audio is not None:
+                self._audio.close()
+                self._audio = None
+            if self._buttons is not None:
+                self._buttons.close()
+                self._buttons = None
+            self._toggle = None
+            if self.jarvis is not None:
+                self.jarvis.stop()
+                self.jarvis = None
+            if self._overlay is not None:
+                self._overlay.close()
+                self._overlay = None
+            elif self.settings.show_preview:
                 cv2.destroyAllWindows()
 
     def _write_session(self) -> None:
@@ -755,6 +848,68 @@ class GestureController:
 
     # -- preview -----------------------------------------------------------
 
+    def _dump_frame(self, hand) -> None:
+        """Save one real frame and its landmarks, for debugging the overlay.
+
+        The gauntlet has been tuned against a synthetic hand for a long time,
+        and the synthetic hand keeps disagreeing with the camera: poses that
+        render cleanly here come apart on a real one. A fixture cannot be
+        argued with, so this writes out an actual frame -- the image, the image
+        landmarks, and the metric world landmarks -- to be replayed offline.
+
+        It takes its own copy of the camera frame rather than the one on
+        screen, because the overlay may be showing a crop of it while `norm`
+        is still in the whole frame's coordinates. Saving the two together
+        would put the landmarks somewhere other than the hand.
+        """
+        import datetime
+        frame = self.tracker.latest_preview()
+        if frame is None:
+            return
+        frame = cv2.flip(frame, 1)
+        h, w = frame.shape[:2]
+        pts = hand.norm.copy()
+        pts[:, 0] = 1.0 - pts[:, 0]
+        pts = pts * np.array([w, h])
+        out = pathlib.Path(__file__).resolve().parent.parent / "captures"
+        out.mkdir(exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%H%M%S")
+        path = out / f"hand_{stamp}.npz"
+        np.savez_compressed(
+            path,
+            frame=frame,
+            norm=np.asarray(hand.norm, dtype=np.float32),
+            world=(np.zeros((21, 3), np.float32) if hand.world is None
+                   else np.asarray(hand.world, dtype=np.float32)),
+            screen=(np.zeros((21, 2), np.float32) if pts is None
+                    else np.asarray(pts, dtype=np.float32)),
+            handedness=str(hand.handedness))
+        print(f"Saved {path.name} -- send this and the overlay can be "
+              f"debugged against your own hand instead of a fixture.")
+
+    def _draw_glove(self, frame, hand, pts) -> bool:
+        """Skin the rigged glove onto the hand and draw it.
+
+        Two ways down: a depth buffer on the GPU, or the flat rasteriser this
+        project already had. The geometry is identical either way -- only the
+        shading and the hidden-surface test differ -- so a machine with no
+        usable GL context loses the smooth shading and the correct overlaps
+        and keeps a glove on the hand.
+        """
+        posed = self._glove.pose(hand, pts)
+        if posed is None:
+            return False
+        # The coverage claim exists to stop the overlay dimming a translucent
+        # glove a second time for not differing enough from the camera behind
+        # it. With no camera behind it there is nothing to differ from, and
+        # claiming the silhouette would flatten the projection into an opaque
+        # cyan hand-shape -- so the hologram's own brightness is left to be
+        # its opacity, which is what makes it look like light.
+        claim = None if self._hide_camera() else self._solid
+        if self._gpu is not None and self._gpu.draw(frame, posed, solid=claim):
+            return True
+        return draw_flat(frame, posed)
+
     def _pinch_fraction(self, hand) -> float:
         """How closed the pinch is, 0 (open) to 1 (clicking).
 
@@ -774,54 +929,14 @@ class GestureController:
 
 
 
-    def _draw_preview(self, window: str, hand: HandFrame | None) -> bool:
-        frame = self.tracker.latest_preview()
-        if frame is None:
-            return True
-        frame = cv2.flip(frame, 1)                 # mirror, so it reads like a mirror
-        h, w = frame.shape[:2]
+    def _draw_readouts(self, frame, hand: HandFrame | None, w: int) -> None:
+        """The status strip along the top: mode, frame rate, jitter, pinch gap.
 
-        if hand is not None:
-            pts = hand.norm.copy()
-            pts[:, 0] = 1.0 - pts[:, 0]
-            pts = pts * np.array([w, h])
-            if self.settings.gauntlet:
-                gauntlet.draw(frame, pts, hand.handedness,
-                              charge=self._pinch_fraction(hand))
-            else:
-                ipts = pts.astype(int)
-                for a, b in lm.CONNECTIONS:
-                    cv2.line(frame, tuple(ipts[a]), tuple(ipts[b]), (120, 90, 40), 2)
-                for i, p in enumerate(ipts):
-                    hot = i in (lm.THUMB_TIP, lm.INDEX_TIP, lm.MIDDLE_TIP)
-                    cv2.circle(frame, tuple(p), 6 if hot else 3,
-                               (255, 163, 77) if hot else (140, 160, 190), -1)
-
-        # In direct mode the preview *is* the map: this window scaled up to the
-        # monitor is exactly where the cursor goes. Drawing the cursor on it
-        # makes that correspondence visible rather than something to take on
-        # trust, and gives the edges of your reach a visible boundary.
-        if self.settings.aim_mode == "direct" and not self.paused:
-            m = self.settings.direct_margin
-            if m > 0:
-                # Dim the overscan border: everything outside the bright
-                # rectangle is already pinned to the edge of the screen, so
-                # the rectangle is the part of the view that still has
-                # anywhere left to go.
-                x0, y0 = int(w * m), int(h * m)
-                x1, y1 = int(w * (1 - m)), int(h * (1 - m))
-                shade = frame.copy()
-                for box in ((0, 0, w, y0), (0, y1, w, h),
-                            (0, y0, x0, y1), (x1, y0, w, y1)):
-                    cv2.rectangle(shade, box[:2], box[2:], (12, 14, 18), -1)
-                cv2.addWeighted(shade, 0.55, frame, 0.45, 0, frame)
-                cv2.rectangle(frame, (x0, y0), (x1, y1), (110, 125, 145), 1)
-            px = int(self._position[0] / max(self.model.screen[0] - 1, 1) * w)
-            py = int(self._position[1] / max(self.model.screen[1] - 1, 1) * h)
-            cv2.line(frame, (px - 14, py), (px + 14, py), (255, 163, 77), 2)
-            cv2.line(frame, (px, py - 14), (px, py + 14), (255, 163, 77), 2)
-            cv2.circle(frame, (px, py), 20, (255, 163, 77), 1)
-
+        Windowed preview only. These are tuning numbers, and on a full-screen
+        overlay a permanent bar across the top of the monitor costs more than
+        they are worth -- the session log records the same signals, and
+        --window brings the strip back when something needs watching live.
+        """
         colour = (80, 200, 120) if not self.paused else (60, 160, 250)
         cv2.rectangle(frame, (0, 0), (w, 34), (18, 20, 26), -1)
         cv2.putText(frame, f"{self.mode.upper():<11} {self.tracker.fps:4.0f} fps",
@@ -865,30 +980,449 @@ class GestureController:
         cv2.putText(frame, f"({self._position[0]:.0f}, {self._position[1]:.0f})",
                     (w - 150, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (150, 160, 175), 1, cv2.LINE_AA)
+
+    # -- driving the mouse, or not -------------------------------------------
+    #
+    # `self.paused` is the one flag: it already short-circuits _update before
+    # anything reaches the cursor, and three things now set it -- the button,
+    # Ctrl+Alt+P and Ctrl+Alt+M, and the held-open-palm pose. A second flag
+    # for the button would have to agree with this one forever, and the first
+    # time they disagreed the symptom would be a dead cursor with a button
+    # insisting gestures were on.
+
+    def _gestures_changed(self, gestures: bool) -> None:
+        """The button was clicked. Runs on the toggle window's own thread."""
+        self._set_paused(not gestures)
+
+    def _set_paused(self, paused: bool) -> None:
+        if bool(paused) == self.paused:
+            return
+        self.paused = bool(paused)
+        # Whatever was held down was held by a hand that is no longer driving.
+        self._release_everything()
+        if self.jarvis is not None:
+            self.jarvis.say_line("The mouse is yours, sir." if self.paused
+                                 else "Gesture control resumed.")
+        print("Paused." if self.paused else "Resumed.")
+
+    def _sync_toggle(self) -> None:
+        """Keep the button showing what is actually happening.
+
+        Pausing has three other doors -- two hotkeys and a pose -- and a
+        button that only tracked its own clicks would sit there claiming
+        gestures were on while an open palm had stopped them.
+        """
+        if self._toggle is not None and self._toggle.gestures == self.paused:
+            self._toggle.set(not self.paused)
+
+    # -- jarvis ------------------------------------------------------------
+
+    def _start_jarvis(self) -> None:
+        """Bring Jarvis up, and say plainly whatever could not be brought up.
+
+        Never fatal. Every part of it is optional -- no FreeClaw, no
+        microphone, no speakers -- and the overlay is worth having without
+        any of them, so each missing piece is a printed line rather than an
+        exception.
+        """
+        from .jarvis.reactor import Reactor
+
+        self.jarvis = Jarvis()
+        self.jarvis.start()
+        for note in self.jarvis.notes:
+            print(f"  Jarvis: {note}")
+        if self.jarvis.settings.ready():
+            print("  Jarvis: linked to FreeClaw at "
+                  f"{self.jarvis.settings.url}. Say \"hey Jarvis\".")
+        short = min(self.model.screen)
+        self._reactor = Reactor(int(short * self.jarvis.settings.reactor_size))
+        self._reactor_at = time.monotonic()
+
+        # The buttons have to be their own windows: the overlay is
+        # click-through so that it does not swallow the clicks this app makes,
+        # and that is a whole-window flag -- there is no way to make one
+        # rectangle of it answer the mouse. Flush into the corner, with the
+        # orb below them.
+        from .jarvis.toggle import MARGIN, Strip
+
+        width, _height = self.model.screen
+        self._buttons = Strip(width, on_gestures=self._gestures_changed,
+                              on_reset=self._reset_conversation,
+                              on_quit=self._quit_from_button)
+        for note in self._buttons.notes:
+            print(f"  Jarvis: {note}")
+        if not self._buttons.available:
+            print("  Jarvis: use Ctrl+Alt+M and Ctrl+Alt+Q instead.")
+        # Named separately because the rest of the app only ever asks about
+        # this one, and it has a keyboard route when the window is covered.
+        self._toggle = self._buttons.toggle if self._buttons.available else None
+        # Where the orb may start. The preview is a crop of the camera scaled
+        # to the screen, so a screen-space y has to be scaled the same way --
+        # otherwise the orb overlaps the buttons on any machine whose camera
+        # and monitor are not the same size.
+        self._orb_top = self._buttons.bottom + 8
+
+        # The audio widget, bottom right. The terminal grows downward from the
+        # orb and has to stop above this, which is what _panel_floor records.
+        screen_h = self.model.screen[1]
+        self._panel_floor = screen_h - 46
+        if self.jarvis.settings.audio_widget:
+            from .jarvis.audio_panel import AudioPanel, HEIGHT as A_H, WIDTH as A_W
+
+            self._audio = AudioPanel(x=width - A_W - MARGIN,
+                                     y=screen_h - A_H - 46)
+            for note in self._audio.notes:
+                print(f"  Jarvis: {note}")
+            if not self._audio.available:
+                self._audio = None
+            else:
+                self._panel_floor = screen_h - A_H - 46 - MARGIN
+
+    def _quit_from_button(self) -> None:
+        """QUIT: the same exit Ctrl+Alt+Q takes.
+
+        Sets the flag rather than tearing anything down here: this runs on the
+        button's own message thread, and the shutdown sequence -- releasing
+        held keys, writing the session log, closing six windows -- belongs to
+        the thread that owns all of it.
+        """
+        print("  Jarvis: closing.")
+        self.running = False
+
+    def _reset_conversation(self) -> None:
+        """RESET: forget the conversation, on both sides of the link.
+
+        On a thread, because clearing it means an HTTP call to FreeClaw and
+        the button's message loop has to return immediately -- a window that
+        stops pumping messages is a window Windows draws as "not responding".
+        """
+        if self.jarvis is None:
+            return
+        threading.Thread(target=self.jarvis.forget, name="jarvis-reset",
+                         daemon=True).start()
+
+    def _add_freeclaw(self) -> None:
+        """Ctrl+Alt+J: open the setup dialog, and pick up what it wired.
+
+        The dialog is a separate process (see jarvis/dialog.py), so this
+        starts it and gets out of the way -- the overlay keeps drawing while
+        someone types. When it exits, whatever it saved is reloaded and
+        Jarvis is restarted around it.
+        """
+        from .jarvis.dialog import open_dialog
+
+        if self._dialog is not None and self._dialog.poll() is None:
+            if self.jarvis is not None:
+                self.jarvis.say_line("The FreeClaw window is already open, sir.")
+            return
+        self._dialog = open_dialog()
+        if self._dialog is None:
+            print("  Jarvis: could not open the Add FreeClaw window.")
+        elif self.jarvis is not None:
+            self.jarvis.say_line("Add FreeClaw is open.")
+
+    def _relink_if_dialog_finished(self) -> None:
+        """Restart Jarvis once the setup dialog has closed."""
+        if self._dialog is None or self._dialog.poll() is None:
+            return
+        self._dialog = None
+        if self.jarvis is not None:
+            self.jarvis.stop()
+        if self._terminal is not None:
+            self._terminal.close()
+            self._terminal = None
+        self._terminal_placed = False
+        self._start_jarvis()
+
+    def _draw_jarvis(self, frame) -> None:
+        """The reactor, and whatever Jarvis last said."""
+        if self.jarvis is None or self._reactor is None:
+            return
+        now = time.monotonic()
+        # Real elapsed time, not a fixed step: the preview only redraws when
+        # the camera produces a frame, so a fixed step would make the
+        # animation run at whatever rate the webcam happens to manage.
+        dt = min(now - self._reactor_at, 0.25)
+        self._reactor_at = now
+        self._reactor.set_state(self.jarvis.state, self.jarvis.voice_level())
+        if self.jarvis.took_wake():
+            self._reactor.flare()
+        # The frame is the reach-crop, not the screen, so the button's
+        # screen-space position has to be scaled into it.
+        scale = frame.shape[1] / max(self.model.screen[0], 1)
+        box = self._reactor.draw(frame, dt, top=int(self._orb_top * scale),
+                                 solid=self._solid)
+        self._place_terminal(frame.shape, box)
+
+        self._sync_toggle()
+        line = self.jarvis.caption()
+        if not line:
+            return
+        h, w = frame.shape[:2]
+        font, scale = cv2.FONT_HERSHEY_SIMPLEX, 0.62
+        (tw, th), _ = cv2.getTextSize(line, font, scale, 1)
+        x, y = max(12, (w - tw) // 2), h - 52
+        # A slab behind it: the caption sits over whatever the camera and the
+        # desktop happen to be showing, and amber on a bright window is
+        # unreadable without one.
+        cv2.rectangle(frame, (x - 14, y - th - 12), (x + tw + 14, y + 12),
+                      (24, 17, 11), -1)
+        cv2.putText(frame, line, (x, y), font, scale, (252, 196, 96), 1, cv2.LINE_AA)
+
+    def _place_terminal(self, shape, box) -> None:
+        """Open the session log under the orb, the first time a frame arrives.
+
+        Not at startup, because where the orb *lands on the screen* is not
+        known until then. The reactor is drawn into the camera frame, which
+        the overlay then stretches over the whole monitor, so the orb's
+        on-screen size is its size in the frame divided by that stretch -- and
+        the stretch depends on the camera's resolution and how much of its
+        view still reaches the screen. Guessing it would put the terminal
+        somewhere under the orb on this machine and through it on the next.
+        """
+        if self._terminal_placed or self.jarvis is None:
+            return
+        if not self.jarvis.settings.terminal:
+            self._terminal_placed = True
+            return
+        self._terminal_placed = True
+        from .jarvis.terminal import Terminal
+
+        height, width = shape[:2]
+        screen_w, screen_h = self.model.screen
+        kx, ky = screen_w / max(width, 1), screen_h / max(height, 1)
+        right, top = int(box[2] * kx), int(box[3] * ky) + 10
+
+        want_w = int(screen_w * self.jarvis.settings.terminal_width)
+        want_h = int(screen_h * self.jarvis.settings.terminal_height)
+        # Clamped to the gap between the orb and whatever owns the bottom of
+        # the screen. This is the whole point of the window: it ends where it
+        # says it ends, however long the conversation gets.
+        room = self._panel_floor - top
+        if room < 140:
+            print("  Jarvis: no room under the orb for the session log.")
+            return
+        panel_w, panel_h = max(360, want_w), min(want_h, room)
+        panel_x = max(0, min(right, screen_w) - panel_w)
+
+        terminal = Terminal(panel_x, top, panel_w, panel_h,
+                            source=self._jarvis_log)
+        for note in terminal.notes:
+            print(f"  Jarvis: {note}")
+        self._terminal = terminal if terminal.available else None
+
+    def _jarvis_log(self):
+        """What the terminal draws. Called on its thread, not this one."""
+        if self.jarvis is None:
+            return [], "idle"
+        return self.jarvis.log(), self.jarvis.state
+
+    def _blank_for(self, shape) -> np.ndarray:
+        """A black frame to draw on, reused rather than made each time.
+
+        Two arrays, not one: the overlay compares the finished frame against
+        the bare one to work out what was drawn, so the drawing surface and
+        the thing it is compared against cannot be the same object. The
+        comparison one never changes, so it is only ever zeroed once.
+        """
+        if self._blank is None or self._blank.shape != tuple(shape):
+            self._blank = np.zeros(shape, np.uint8)
+            self._blank_clean = np.zeros(shape, np.uint8)
+        else:
+            self._blank[:] = 0
+        self._clean_frame = self._blank_clean
+        return self._blank
+
+    def _hide_camera(self) -> bool:
+        """Whether to drop the webcam picture and show only what is drawn.
+
+        Only in the overlay: a floating window with no camera in it is an
+        empty rectangle, where the overlay has a desktop behind it for the
+        glove to float over.
+        """
+        return self._overlay is not None and self.settings.overlay_dim <= 0.0
+
+    def _reach_box(self, w: int, h: int) -> tuple[int, int, int, int] | None:
+        """The part of the camera's view that can still reach the screen.
+
+        Outside it the cursor is already pinned to an edge, so on a full-screen
+        overlay it is not just useless but misleading: the glove would go on
+        moving after the cursor had stopped.  None when there is nothing to
+        crop -- a floating window shows the whole view on purpose, and only
+        direct mode has a margin to crop to.
+        """
+        if self._overlay is None or self.settings.aim_mode != "direct":
+            return None
+        m = self.settings.direct_margin
+        if m <= 0:
+            return None
+        return int(w * m), int(h * m), int(w * (1 - m)), int(h * (1 - m))
+
+    def _draw_preview(self, window: str, hand: HandFrame | None) -> bool:
+        # Redrawing a frame the camera has not replaced yet is work for an
+        # identical picture, and at full-screen size that is most of a core.
+        # The window path has cv2.waitKey to pace it; the overlay has nothing,
+        # so it gets paced here instead.  Hotkeys are still collected, because
+        # the app has to answer Ctrl+Alt+Q between camera frames as well.
+        stamp = self.tracker.frames_processed
+        fresh = stamp != self._drawn_stamp
+        self._drawn_stamp = stamp
+        if self._overlay is not None and not fresh:
+            return self._handle_keys(self._overlay.keys(), hand)
+
+        raw = self.tracker.latest_preview()
+        if raw is None:
+            return True
+        full_h, full_w = raw.shape[:2]
+
+        # Direct mode stretches the middle of the camera's view over the whole
+        # screen, so a full-screen overlay showing the whole view would draw
+        # the glove somewhere the cursor is not -- right only at dead centre,
+        # and off by the overscan factor at the edges. Showing exactly the part
+        # that maps makes the hand and the cursor the same place again, which
+        # is the one thing a full-screen overlay is for.
+        #
+        # Cropped before it is mirrored, not after. Mirroring is a copy of
+        # every pixel, and two thirds of them are about to be thrown away --
+        # at 1080p that was 3.2ms a frame spent flipping a border nothing
+        # would ever see. The crop is taken from the mirror image of the box,
+        # so the pixels that survive are the same ones either way.
+        box = self._reach_box(full_w, full_h)
+        if box is not None:
+            x0, y0, x1, y1 = box
+        else:
+            x0, y0, x1, y1 = 0, 0, full_w, full_h
+
+        # With the camera hidden there is nothing to draw the glove *onto*, so
+        # everything is drawn onto black instead. That is not just cosmetic:
+        # the overlay works out opacity by comparing the finished frame against
+        # this one, so blanking it here is what makes "the difference from the
+        # background" mean "the light the app added" rather than "the light the
+        # app added, plus a room".
+        #
+        # And when it is hidden, the mirror never happens at all: flipping a
+        # picture in order to paint over every one of its pixels is work for an
+        # answer that was known before the camera was read. It is black.
+        if self._hide_camera():
+            frame = self._blank_for((y1 - y0, x1 - x0, 3))
+        else:
+            # Mirrored by taking the box's own reflection and flipping that,
+            # rather than flipping the whole frame and cropping afterwards.
+            frame = cv2.flip(raw[y0:y1, full_w - x1:full_w - x0], 1)
+            self._clean_frame = frame.copy()
+        h, w = frame.shape[:2]
+
+        # Everything the app draws has to be opaque whatever the camera is
+        # showing, so it declares that here rather than hoping the overlay
+        # infers it. See Overlay.show for why inference is not enough. Built
+        # before the glove, because the glove is the first thing to claim it.
+        shape = frame.shape[:2]
+        if self._solid is None or self._solid.shape != shape:
+            self._solid = np.zeros(shape, np.uint8)
+        else:
+            self._solid[:] = 0
+
+        pts = None
+        if hand is not None:
+            pts = hand.norm.copy()
+            pts[:, 0] = 1.0 - pts[:, 0]
+            pts = pts * np.array([full_w, full_h])
+            if box is not None:
+                pts = pts - np.array([box[0], box[1]])
+            if self.settings.gauntlet:
+                charge = self._pinch_fraction(hand)
+                drew = False
+                if self._glove is not None:
+                    drew = self._draw_glove(frame, hand, pts)
+                if not drew:
+                    gauntlet.draw(frame, pts, hand.handedness, charge=charge)
+            else:
+                ipts = pts.astype(int)
+                for a, b in lm.CONNECTIONS:
+                    cv2.line(frame, tuple(ipts[a]), tuple(ipts[b]), (120, 90, 40), 2)
+                for i, p in enumerate(ipts):
+                    hot = i in (lm.THUMB_TIP, lm.INDEX_TIP, lm.MIDDLE_TIP)
+                    cv2.circle(frame, tuple(p), 6 if hot else 3,
+                               (255, 163, 77) if hot else (140, 160, 190), -1)
+
+        # In direct mode the preview *is* the map: this window scaled up to the
+        # monitor is exactly where the cursor goes. Drawing the cursor on it
+        # makes that correspondence visible rather than something to take on
+        # trust, and gives the edges of your reach a visible boundary.
+        if self.settings.aim_mode == "direct" and not self.paused:
+            m = self.settings.direct_margin
+            if m > 0 and box is None:
+                # Dim the overscan border: everything outside the bright
+                # rectangle is already pinned to the edge of the screen, so
+                # the rectangle is the part of the view that still has
+                # anywhere left to go. The overlay has no border to dim --
+                # it was cropped to the rectangle -- and dimming one there
+                # would repaint half the screen, which the overlay reads as
+                # something deliberately drawn and makes solid.
+                x0, y0 = int(w * m), int(h * m)
+                x1, y1 = int(w * (1 - m)), int(h * (1 - m))
+                shade = frame.copy()
+                for edge in ((0, 0, w, y0), (0, y1, w, h),
+                             (0, y0, x0, y1), (x1, y0, w, y1)):
+                    cv2.rectangle(shade, edge[:2], edge[2:], (12, 14, 18), -1)
+                cv2.addWeighted(shade, 0.55, frame, 0.45, 0, frame)
+                cv2.rectangle(frame, (x0, y0), (x1, y1), (110, 125, 145), 1)
+            px = int(self._position[0] / max(self.model.screen[0] - 1, 1) * w)
+            py = int(self._position[1] / max(self.model.screen[1] - 1, 1) * h)
+            cv2.line(frame, (px - 14, py), (px + 14, py), (255, 163, 77), 2)
+            cv2.line(frame, (px, py - 14), (px, py + 14), (255, 163, 77), 2)
+            cv2.circle(frame, (px, py), 20, (255, 163, 77), 1)
+
+        self._draw_jarvis(frame)
+        if self._overlay is None:
+            self._draw_readouts(frame, hand, w)
         cv2.rectangle(frame, (0, h - 26), (w, h), (18, 20, 26), -1)
         if self.finder is not None and self.settings.snap_enabled:
             snap_state = f"on, {len(self.finder.targets())} targets"
         else:
             snap_state = "off"
-        cv2.putText(frame, f"Q/Esc: quit   P: pause   K: keyboard   "
-                           f"S: snapping ({snap_state})",
+        hint = "Ctrl+Alt+" if self._overlay is not None else ""
+        jarvis_state = ("off" if self.jarvis is None
+                        else "ready" if self.jarvis.settings.ready()
+                        else "not linked")
+        cv2.putText(frame, f"{hint}Q: quit   {hint}P: pause   {hint}K: keyboard   "
+                           f"{hint}S: snapping ({snap_state})   "
+                           f"{hint}J: FreeClaw ({jarvis_state})",
                     (10, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                     (120, 132, 150), 1, cv2.LINE_AA)
 
-        cv2.imshow(window, frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key in (ord("q"), 27):
-            return False
-        if key == ord("p"):
-            self.paused = not self.paused
-            self._release_everything()
-        if key == ord("k"):
-            print("On-screen keyboard shown." if keyboard.toggle()
-                  else "On-screen keyboard hidden.")
-        if key == ord("s"):
-            self.settings.snap_enabled = not self.settings.snap_enabled
-            self.snap_target = None
-            print("Snapping on." if self.settings.snap_enabled else "Snapping off.")
-        if cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) < 1:
-            return False
+        if self._overlay is not None:
+            self._overlay.show(frame, self._clean_frame, solid=self._solid)
+            pressed = self._overlay.keys()
+        else:
+            cv2.imshow(window, frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:
+                return False
+            pressed = [chr(key)] if 32 <= key < 127 else []
+            if cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) < 1:
+                return False
+        return self._handle_keys(pressed, hand)
+
+    def _handle_keys(self, pressed, hand) -> bool:
+        """Act on the keys the preview collected. False means quit."""
+        for key in pressed:
+            if key == "q":
+                return False
+            if key == "p":
+                self._set_paused(not self.paused)
+            if key == "k":
+                print("On-screen keyboard shown." if keyboard.toggle()
+                      else "On-screen keyboard hidden.")
+            if key == "s":
+                self.settings.snap_enabled = not self.settings.snap_enabled
+                self.snap_target = None
+                print("Snapping on." if self.settings.snap_enabled
+                      else "Snapping off.")
+            if key == "d" and hand is not None:
+                self._dump_frame(hand)
+            if key == "j":
+                self._add_freeclaw()
+            if key == "m":
+                self._set_paused(not self.paused)
         return True

@@ -162,21 +162,6 @@ class HandFrame:
             return max(flat, depth_gap)
         return flat
 
-    def pinch_span_cm(self, tip: int = lm.INDEX_TIP) -> float | None:
-        """Closest approach of the thumb and finger pads, in centimetres.
-
-        Measured between the last bone of each digit rather than between the
-        two tip landmarks, because a pinch is pads meeting and the pads are
-        not at the tips: with the hand turned, the thumb can rest on the side
-        of the finger while the tips stay a centimetre apart.
-        """
-        if self.world is None:
-            return None
-        palm_m = lm.hand_scale(self.world)
-        if palm_m < 1e-6:
-            return None
-        return lm.pinch_span(self.world, tip) * palm_m * 100.0
-
     def bones(self) -> np.ndarray | None:
         """Lengths of the pinch-relevant bones, for the plausibility check."""
         return None if self.world is None else lm.bone_lengths(self.world)

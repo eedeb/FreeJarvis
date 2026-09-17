@@ -97,15 +97,6 @@ class Target:
         tall = self.height >= long_px and self.height >= self.width * long_ratio
         return (not wide, not tall)
 
-    def nearest_point(self, point, inset: float = 0.0) -> np.ndarray:
-        """Closest point inside the rectangle, pulled `inset` off the edge."""
-        ix = min(inset, max(self.width / 2.0 - 1.0, 0.0))
-        iy = min(inset, max(self.height / 2.0 - 1.0, 0.0))
-        return np.array([
-            min(max(point[0], self.left + ix), self.right - ix),
-            min(max(point[1], self.top + iy), self.bottom - iy),
-        ])
-
     def distance(self, point) -> float:
         dx = max(self.left - point[0], 0.0, point[0] - self.right)
         dy = max(self.top - point[1], 0.0, point[1] - self.bottom)

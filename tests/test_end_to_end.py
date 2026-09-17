@@ -9,10 +9,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import numpy as np
 from dataclasses import replace
 
-from gesture_control import landmarks as lm
 from gesture_control.config import Settings
 
-from synthetic_hand import (ASPECT, POINTING, OPEN_PALM, TWO_FINGERS,
+from synthetic_hand import (POINTING, OPEN_PALM, TWO_FINGERS,
                             SCREEN, FakeTracker, make_hand, rng)
 
 
@@ -313,7 +312,7 @@ except Exception:
     pass
 # ------------------------------------------------- snapping, through the controller
 print("\nClicking small buttons, with and without snapping:")
-from gesture_control.targets import Target, TargetFinder
+from gesture_control.targets import Target
 
 # A toolbar of 28x28 icons, the case hand pointing is worst at.
 buttons = [Target(300 + i * 40, 200, 328 + i * 40, 228, "button") for i in range(8)]

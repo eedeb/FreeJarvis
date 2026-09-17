@@ -12,7 +12,7 @@ from gesture_control.config import Settings
 from gesture_control.controller import GestureController
 from gesture_control.calibrate import CalibrationWindow, _Dot, target_grid
 from gesture_control.mapping import fit_pointer_map
-from synthetic_hand import (FIST, OPEN_PALM, POINTING, SCREEN, TWO_FINGERS,
+from synthetic_hand import (FIST, OPEN_PALM, SCREEN, TWO_FINGERS,
                             FakeTracker, make_hand)
 
 ok = True

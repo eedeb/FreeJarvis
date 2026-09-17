@@ -37,7 +37,6 @@ GOLD = (58, 176, 232)
 GOLD_LIT = (128, 220, 252)
 STEEL_DARK = (74, 72, 80)
 STEEL = (116, 116, 124)
-STEEL_LIT = (162, 162, 170)
 SEAM = (14, 12, 20)
 
 # Across the knuckles index to pinky, then the thumb, then the boss on the back

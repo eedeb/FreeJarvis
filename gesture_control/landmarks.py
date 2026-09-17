@@ -112,38 +112,6 @@ def bone_lengths(points: np.ndarray) -> np.ndarray:
     return np.array([float(np.linalg.norm(points[a] - points[b])) for a, b in pairs])
 
 
-def _segment_distance(p0, p1, q0, q1) -> float:
-    """Closest approach of two line segments.
-
-    A pinch is two finger *pads* meeting, and the pads are not at the
-    landmarks: depending on how the hand is turned, the thumb can rest against
-    the side of the finger with the tips still a centimetre apart. Measuring
-    between the last bone of each digit, rather than between their tips, gets
-    at contact rather than at a particular pair of points.
-    """
-    u, v, w = p1 - p0, q1 - q0, p0 - q0
-    a, b, c = float(u @ u), float(u @ v), float(v @ v)
-    d, e = float(u @ w), float(v @ w)
-    denom = a * c - b * b
-    if denom < 1e-12:                      # parallel: fall back to endpoints
-        s, t = 0.0, (e / c if c > 1e-12 else 0.0)
-    else:
-        s = min(max((b * e - c * d) / denom, 0.0), 1.0)
-        t = min(max((a * e - b * d) / denom, 0.0), 1.0)
-    return float(np.linalg.norm(w + u * s - v * t))
-
-
-def pinch_span(points: np.ndarray, tip: int) -> float:
-    """How close the thumb and the given finger come, as a fraction of the palm."""
-    scale = hand_scale(points)
-    if scale < 1e-9:
-        return float("inf")
-    dip = {INDEX_TIP: INDEX_DIP, MIDDLE_TIP: MIDDLE_PIP,
-           RING_TIP: RING_PIP, PINKY_TIP: PINKY_PIP}.get(tip, INDEX_DIP)
-    return _segment_distance(points[THUMB_IP], points[THUMB_TIP],
-                             points[dip], points[tip]) / scale
-
-
 def pinch_ratio(points: np.ndarray, tip: int) -> float:
     """Thumb-to-fingertip gap as a fraction of palm length (0 = touching)."""
     scale = hand_scale(points)

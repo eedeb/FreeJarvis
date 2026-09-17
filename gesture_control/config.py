@@ -240,9 +240,36 @@ class Settings:
 
     # --- behaviour ----------------------------------------------------
     show_preview: bool = True
+    # Draw the preview as a full-screen overlay you can see and click through,
+    # pinned below every application window, instead of as a floating window.
+    # The floating window is still there (--window) because it is the one that
+    # can be screenshotted and dragged around while working on the gauntlet.
+    overlay: bool = True
+    # The camera's share of the overlay. The glove and the readouts drawn on
+    # top of it stay solid whatever this is, so lowering it fades the webcam
+    # out from under them rather than fading the whole thing.
+    #
+    # 0 -- the default -- hides the camera altogether: no webcam picture, just
+    # the glove tracking your hand and the readouts, floating over your
+    # desktop. Raise it to see the room the hand is in, which is mostly useful
+    # when the tracking is behaving oddly and you want to see what the camera
+    # sees.
+    overlay_dim: float = 0.0
     # Draw the nano gauntlet over your hand in the preview instead of the bare
     # tracking skeleton. Cosmetic only -- the control loop never reads it.
     gauntlet: bool = True
+    # How the gauntlet is drawn, best first:
+    #   "rig"    the generated glove from models/gauntlet.glb, skinned onto the
+    #            tracked skeleton and drawn with a depth buffer
+    #   "drawn"  flat vectors, needing nothing but OpenCV
+    # The rig falls back to "drawn" on its own if the model file or the GL
+    # context is missing, so this only ever forces something simpler.
+    gauntlet_model: str = "rig"
+    # How the glove is rendered:
+    #   "holo"   projected light -- translucent, rim-lit, cyan, scanlined,
+    #            the way Stark's workbench draws a part it is working on
+    #   "solid"  painted metal, red and gold
+    gauntlet_style: str = "holo"
     max_hands: int = 1
     lost_hand_grace_ms: float = 500.0
 

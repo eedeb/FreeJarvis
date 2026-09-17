@@ -6,10 +6,10 @@ import sys, pathlib, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import cv2
 import numpy as np
 
 from gesture_control import gauntlet
-from gesture_control import landmarks as lm
 from gesture_control.config import Settings
 from synthetic_hand import OPEN_PALM, POINTING, FIST
 
@@ -123,18 +123,44 @@ check("the palm side ignores the charge, having no stones to light",
 print("\nIt has to keep up with the camera:")
 big = np.full((1080, 1920, 3), 28, np.uint8)
 hd = px(OPEN_PALM, scale=260.0, cx=900.0, cy=600.0)
-gauntlet.draw(big, hd, "Right")            # warm up
-started = time.perf_counter()
-for _ in range(50):
-    gauntlet.draw(big, hd, "Right")
-ms = (time.perf_counter() - started) / 50 * 1000.0
-print(f"      {ms:.2f} ms per frame at 1080p")
-# A 30 fps loop has 33 ms to spend, so the overlay gets a small share of it.
-# This bound is not decoration: drawn naively the bloom alone took 390 ms, and
-# the first two attempts at fixing it landed at 9 ms. Measured at 4.5 ms.
-check(f"draws in a small fraction of a frame ({ms:.2f} ms)", ms < 6.0)
+# Timed against the machine, not against a stopwatch. An absolute millisecond
+# bound here failed repeatedly on code that had not changed: this same renderer
+# measured 4.3ms on an idle machine and 8.0ms half an hour later. What is worth
+# holding is how much the drawing costs relative to the primitive it is built
+# from, which moves with the machine and cancels out.
+def fastest(fn, batch, rounds=3):
+    fn()
+    best = float("inf")
+    for _ in range(rounds):
+        started = time.perf_counter()
+        for _ in range(batch):
+            fn()
+        best = min(best, (time.perf_counter() - started) / batch * 1000.0)
+    return best
 
-print("\nIt stays out of the control path:")
+
+gauntlet.draw(big, hd, "Right")            # warm up
+ms = fastest(lambda: gauntlet.draw(big, hd, "Right"), 25)
+
+tri = np.array([[0, 0], [34, 9], [16, 34]], np.int32)
+spots = np.random.default_rng(0).integers(0, 900, (600, 1, 2)).astype(np.int32)
+
+
+def bare_fills():
+    for spot in spots:
+        cv2.fillConvexPoly(big, tri + spot, (40, 30, 120), cv2.LINE_AA)
+
+
+bare = fastest(bare_fills, 4)
+ratio = ms / max(bare, 1e-6)
+print(f"      {ms:.2f} ms per frame at 1080p, against {bare:.2f} ms for 600 bare "
+      f"antialiased fills -- {ratio:.2f}x")
+# Measured at 1.09-1.28x over repeated runs while the absolute time moved
+# between 3.4ms and 8.0ms, which is the whole point of expressing it this way.
+check(f"drawing the gauntlet stays cheap relative to its own primitive "
+      f"({ratio:.2f}x)", ratio < 1.6)
+
+print(chr(10) + "It stays out of the control path:")
 check("on by default", Settings().gauntlet is True)
 check("and can be turned off", Settings(gauntlet=False).gauntlet is False)
 src = (pathlib.Path(__file__).resolve().parent.parent
@@ -142,5 +168,5 @@ src = (pathlib.Path(__file__).resolve().parent.parent
 check("the module imports nothing that could move the mouse",
       "mouse" not in src and "Mouse" not in src)
 
-print("\nRESULT:", "all checks passed" if ok else "SOME CHECKS FAILED")
+print(chr(10) + "RESULT:", "all checks passed" if ok else "SOME CHECKS FAILED")
 raise SystemExit(0 if ok else 1)
