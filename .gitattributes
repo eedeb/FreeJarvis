@@ -1,2 +1,13 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Said explicitly rather than left to `text=auto`'s content sniffing. These
+# are assets a clone has to get back byte for byte: an .ico or a .glb that
+# has had its line endings "normalised" is a corrupt file, and the symptom
+# turns up much later than the cause.
+*.ico  binary
+*.glb  binary
+*.png  binary
+*.jpg  binary
+*.task binary
+*.npz  binary

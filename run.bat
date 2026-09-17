@@ -40,7 +40,7 @@ exit /b %CODE%
 
 :nopython
 echo.
-echo Python was not found. Install Python 3.10 or newer from
+echo Python was not found. Install Python 3.11 or newer from
 echo   https://www.python.org/downloads/windows/
 echo and tick "Add python.exe to PATH" during setup, then run this file again.
 echo.

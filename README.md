@@ -1,22 +1,81 @@
-# Gesture Control
+# FreeJarvis
 
-Point at your screen and the mouse goes there. Pinch to click.
+Point at your screen and the mouse goes there. Pinch to click. Say "hey Jarvis"
+and an assistant with 44 tools answers, on a translucent workbench it can put
+live gauges and cards on.
 
 A webcam watches your hand, MediaPipe finds 21 landmarks on it, and a mapping
 learned during calibration turns your fingertip into a screen coordinate. Real
 Windows mouse input comes out the other end, so it works in every application,
 not just this one.
 
-## Start it
+## Install
 
-Double-click **`run.bat`**.
+In PowerShell:
 
-The first run takes about a minute: it builds a Python environment, installs the
-dependencies, and downloads the hand tracking model (7.8 MB, from Google's
-official MediaPipe bucket). After that it starts in a couple of seconds.
+```powershell
+irm https://raw.githubusercontent.com/eedeb/FreeJarvis/main/install.ps1 | iex
+```
 
-You need Python 3.10 or newer installed. If it is missing, `run.bat` says so and
-links to the installer — tick *Add python.exe to PATH* during setup.
+No administrator rights, and nothing is hosted anywhere but that one script —
+the source comes from this repo, the interpreter from python.org and the
+hand-tracking model from Google, so a release never has to be cut for an
+install to work.
+
+It lands in `%LOCALAPPDATA%\FreeJarvis` with a Start Menu and desktop
+shortcut, a `freejarvis` command on your PATH, and a private Python that
+touches nothing else on the machine. Budget a few minutes and about 700 MB:
+MediaPipe, ONNX Runtime and the speech models are not small.
+
+Re-run the same line to update. Your settings, calibration and FreeClaw link
+are never touched by it.
+
+```powershell
+# start with Windows
+$env:FREEJARVIS_AUTOSTART = 1
+irm https://raw.githubusercontent.com/eedeb/FreeJarvis/main/install.ps1 | iex
+
+# somewhere else, no shortcuts, do not launch it afterwards
+$env:FREEJARVIS_DIR = "D:\Apps\FreeJarvis"
+$env:FREEJARVIS_NO_SHORTCUT = 1
+$env:FREEJARVIS_NO_START = 1
+irm https://raw.githubusercontent.com/eedeb/FreeJarvis/main/install.ps1 | iex
+```
+
+To remove it:
+
+```powershell
+& "$env:LOCALAPPDATA\FreeJarvis\uninstall.ps1"
+```
+
+It offers to copy your settings, calibration and FreeClaw link to the desktop
+first, and it refuses to run in a directory that has no install marker — so
+pointing it at a source checkout deletes nothing.
+
+**You need a webcam.** Everything else is optional: without a microphone it is
+silent, and without a FreeClaw it is still a hand-tracking mouse.
+
+### What the installer actually does
+
+| | |
+|---|---|
+| **source** | `git clone --depth 1`, or a zip download when git isn't installed |
+| **python** | uses a 3.11–3.13 you already have; otherwise fetches 3.12 and installs it *privately*, per-user, not on PATH |
+| **deps** | a venv under the install directory, `pip install -r requirements.txt` |
+| **model** | fetches `hand_landmarker.task` up front, so the first launch is instant |
+| **shortcuts** | Start Menu and desktop, running `pythonw` so there is no console window |
+
+The private Python is the full python.org installer rather than the embeddable
+build that would be the obvious choice, for one reason: the embeddable
+distribution ships without tkinter, and tkinter is what draws the "Add
+FreeClaw" window and the calibration grid. An install built on it would look
+perfectly fine until the moment somebody pressed `Ctrl+Alt+J`.
+
+## Running from a checkout
+
+Double-click **`run.bat`**. It builds a `.venv` beside the source, installs the
+dependencies and downloads the model on first run. You need Python 3.11 or
+newer on PATH — 3.11 because ONNX Runtime does not publish wheels below it.
 
 ## The overlay
 

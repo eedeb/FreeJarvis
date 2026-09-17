@@ -7,3 +7,19 @@ settings.json
 models/incoming/
 models/gauntlet_*.png
 jarvis.json
+
+# Written by install.ps1 into an installed copy, never into a checkout.
+# uninstall.ps1 refuses to delete a directory without the marker, which is
+# what stops it eating a developer's working tree.
+.freejarvis-install
+python/
+python-installer.exe
+bin/
+logs/
+windows/icon_preview.png
+
+# Written by the app at runtime, in the install directory. They must not be
+# tracked: install.ps1 updates with `git reset --hard`, which would restore
+# the committed copy over the top of a user's own calibration samples.
+session_log.csv
+calibration_data.json

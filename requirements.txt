@@ -2,6 +2,9 @@ mediapipe==1.0.1
 opencv-python>=4.10
 numpy>=1.26,<3
 comtypes>=1.4
+moderngl>=5.10            # the gauntlet hologram, drawn on the GPU. Without it
+                          # the CPU renderer takes over -- the app still runs,
+                          # it just costs about twice as much a frame.
 
 # Jarvis — the FreeClaw brain, the arc reactor and "hey Jarvis".
 # The overlay runs without any of these; each missing one turns off the part
